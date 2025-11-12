@@ -35,6 +35,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityCombustByEntityEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityKnockbackByEntityEvent;
 import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.entity.PotionSplashEvent;
 import org.bukkit.event.vehicle.VehicleDamageEvent;
@@ -113,6 +114,54 @@ public class EntityDamageHandler implements Listener
     public void onEntityCombustByEntity(@NotNull EntityCombustByEntityEvent event)
     {
         this.handleEntityDamageEvent(event, false);
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.LOWEST)
+    public void onEntityKnockbackByEntity(@NotNull EntityKnockbackByEntityEvent event)
+    {
+        if (!(event.getEntity() instanceof Player defender)) return;
+
+        Entity hitBy = event.getHitBy();
+        if (!(hitBy instanceof Projectile projectile)) return;
+
+        EntityType projectileType = projectile.getType();
+        if (projectileType != EntityType.WIND_CHARGE && projectileType != EntityType.BREEZE_WIND_CHARGE) return;
+
+        ProjectileSource shooter = projectile.getShooter();
+        if (!(shooter instanceof Player attacker)) return;
+
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        Runnable cancelHandler = () ->
+        {
+            if (cancelled.compareAndSet(false, true))
+            {
+                event.setCancelled(true);
+                projectile.remove();
+            }
+        };
+
+        boolean handled = false;
+
+        if (instance.pvpRulesApply(defender.getWorld()))
+        {
+            handled = handlePvpBetweenPlayers(attacker, defender, true, cancelHandler);
+        }
+
+        if (handled) return;
+
+        if (!instance.claimsEnabledForWorld(defender.getWorld())) return;
+
+        PlayerData attackerData = this.dataStore.getPlayerData(attacker.getUniqueId());
+        if (attackerData.ignoreClaims) return;
+        Claim claim = this.dataStore.getClaimAt(defender.getLocation(), false, attackerData.lastClaim);
+        if (claim == null) return;
+
+        attackerData.lastClaim = claim;
+        Supplier<String> failureReason = claim.checkPermission(attacker, ClaimPermission.Access, event);
+        if (failureReason == null) return;
+
+        cancelHandler.run();
+        GriefPrevention.sendMessage(attacker, TextMode.Err, Messages.PlayerInPvPSafeZone);
     }
 
     private void handleEntityDamageEvent(@NotNull EntityCombustByEntityEvent event, boolean sendMessages)
@@ -439,42 +488,7 @@ public class EntityDamageHandler implements Listener
             @NotNull Player defender,
             boolean sendMessages)
     {
-        if (attacker == defender) return false;
-
-        PlayerData defenderData = this.dataStore.getPlayerData(defender.getUniqueId());
-        PlayerData attackerData = this.dataStore.getPlayerData(attacker.getUniqueId());
-
-        //FEATURE: prevent pvp in the first minute after spawn and when one or both players have no inventory
-        if (instance.config_pvp_protectFreshSpawns)
-        {
-            if (attackerData.pvpImmune || defenderData.pvpImmune)
-            {
-                event.setCancelled(true);
-                if (sendMessages)
-                    GriefPrevention.sendMessage(
-                            attacker,
-                            TextMode.Err,
-                            attackerData.pvpImmune ? Messages.CantFightWhileImmune : Messages.ThatPlayerPvPImmune);
-                return true;
-            }
-        }
-
-        //FEATURE: prevent players from engaging in PvP combat inside land claims (when it's disabled)
-        // Ignoring claims bypasses this feature.
-        if (attackerData.ignoreClaims
-                || !instance.config_pvp_noCombatInPlayerLandClaims
-                && !instance.config_pvp_noCombatInAdminLandClaims)
-        {
-            return false;
-        }
-        Consumer<Messages> cancelHandler = message ->
-        {
-            event.setCancelled(true);
-            if (sendMessages) GriefPrevention.sendMessage(attacker, TextMode.Err, message);
-        };
-        // Return whether PVP is handled by a claim at the attacker or defender's locations.
-        return handlePvpInClaim(attacker, defender, attacker.getLocation(), attackerData, () -> cancelHandler.accept(Messages.CantFightWhileImmune))
-                || handlePvpInClaim(attacker, defender, defender.getLocation(), defenderData, () -> cancelHandler.accept(Messages.PlayerInPvPSafeZone));
+        return handlePvpBetweenPlayers(attacker, defender, sendMessages, () -> event.setCancelled(true));
     }
 
     private boolean handlePvpDamageByPlayer(
@@ -483,17 +497,25 @@ public class EntityDamageHandler implements Listener
             @NotNull Player defender,
             boolean sendMessages)
     {
+        return handlePvpBetweenPlayers(attacker, defender, sendMessages, () -> event.setCancelled(true));
+    }
+
+    private boolean handlePvpBetweenPlayers(
+            @NotNull Player attacker,
+            @NotNull Player defender,
+            boolean sendMessages,
+            @NotNull Runnable cancelAction)
+    {
         if (attacker == defender) return false;
 
         PlayerData defenderData = this.dataStore.getPlayerData(defender.getUniqueId());
         PlayerData attackerData = this.dataStore.getPlayerData(attacker.getUniqueId());
 
-        //FEATURE: prevent pvp in the first minute after spawn and when one or both players have no inventory
         if (instance.config_pvp_protectFreshSpawns)
         {
             if (attackerData.pvpImmune || defenderData.pvpImmune)
             {
-                event.setCancelled(true);
+                cancelAction.run();
                 if (sendMessages)
                     GriefPrevention.sendMessage(
                             attacker,
@@ -503,8 +525,6 @@ public class EntityDamageHandler implements Listener
             }
         }
 
-        //FEATURE: prevent players from engaging in PvP combat inside land claims (when it's disabled)
-        // Ignoring claims bypasses this feature.
         if (attackerData.ignoreClaims
                 || !instance.config_pvp_noCombatInPlayerLandClaims
                 && !instance.config_pvp_noCombatInAdminLandClaims)
@@ -513,10 +533,9 @@ public class EntityDamageHandler implements Listener
         }
         Consumer<Messages> cancelHandler = message ->
         {
-            event.setCancelled(true);
+            cancelAction.run();
             if (sendMessages) GriefPrevention.sendMessage(attacker, TextMode.Err, message);
         };
-        // Return whether PVP is handled by a claim at the attacker or defender's locations.
         return handlePvpInClaim(attacker, defender, attacker.getLocation(), attackerData, () -> cancelHandler.accept(Messages.CantFightWhileImmune))
                 || handlePvpInClaim(attacker, defender, defender.getLocation(), defenderData, () -> cancelHandler.accept(Messages.PlayerInPvPSafeZone));
     }
