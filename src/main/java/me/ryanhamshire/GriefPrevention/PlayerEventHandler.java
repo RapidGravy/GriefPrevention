@@ -1878,6 +1878,7 @@ class PlayerEventHandler implements Listener
                     || materialInHand == Material.ARMOR_STAND
                     || (spawnEggs.contains(materialInHand) && GriefPrevention.instance.config_claims_preventGlobalMonsterEggs)
                     || materialInHand == Material.END_CRYSTAL
+                    || materialInHand == Material.WIND_CHARGE
                     || materialInHand == Material.FLINT_AND_STEEL
                     || materialInHand == Material.INK_SAC
                     || materialInHand == Material.GLOW_INK_SAC
